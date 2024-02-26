@@ -2,7 +2,10 @@
 from collections import Counter
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-tokenizer = tokenizer_mistral = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2")
+model_id = "mistralai/Mistral-7B-Instruct-v0.2"
+model_id = "teknium/OpenHermes-2.5-Mistral-7B"
+
+tokenizer = tokenizer_mistral = AutoTokenizer.from_pretrained(model_id)
 
 mistral_token_lens = {k: len(k) for k in tokenizer_mistral.vocab.keys()}
 
@@ -15,7 +18,7 @@ sorted(list(cnt.items()), key=lambda x: x[0])
 tokenizer_mistral.vocab
 # %%
 from transformers import AutoTokenizer, AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained("teknium/OpenHermes-2.5-Mistral-7B")
+model = AutoModelForCausalLM.from_pretrained(model_id)
 # %%
 
 # Here our goal is to build a encoder that takes in the token's utf-8 bytes and outputs the token's embedding
@@ -137,4 +140,9 @@ input_ids = data['input_ids']
 output_embeddings = data['output_embeddings']
 input_ids.shape, output_embeddings.shape, input_ids.dtype, output_embeddings.dtype
 
+# %%
+# there seems to be 2 extra tokens in the embedding
+df
+# %%
+model.model.embed_tokens.weight.shape
 # %%
