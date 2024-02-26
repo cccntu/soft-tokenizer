@@ -33,20 +33,21 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-eval_interval = 2000
+eval_interval = 30
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'soft-tokenizer' # 'run' + str(time.time())
+wandb_log = True # disabled by default
+wandb_project = 'soft-tokenizer'
+wandb_run_name = 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 64 # if gradient_accumulation_steps > 1, this is the micro-batch size
+# gradient_accumulation_steps = 15 * 8 # used to simulate larger batch sizes
+gradient_accumulation_steps = 1 # used to simulate larger batch sizes
+batch_size = 640 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 50 # max token length
 # model
 n_layer = 4 # 12
@@ -56,7 +57,8 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 600000 # total number of training iterations
+max_epoch = 3 # number of epochs to train for
+max_iters = 10000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -123,6 +125,9 @@ input_ids = data['input_ids']
 output_embeddings = data['output_embeddings']
 input_ids.shape, output_embeddings.shape, input_ids.dtype, output_embeddings.dtype
 print(f"input_ids.shape = {input_ids.shape}, output_embeddings.shape = {output_embeddings.shape}")
+
+max_iters = min(len(input_ids) // batch_size * max_epoch, max_iters)
+print(f"max_iters = {max_iters}")
 
 def get_batch(split):
     data = input_ids #if split == 'train' else val_data
@@ -223,6 +228,26 @@ if compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
+def get_causal_mask(X, pad_value=258):
+    # for some reason, this causes the model to get nan loss
+    # so I disabled it, the model falls back to using the default causal mask,
+    # which still attends to the padding tokens, but it works
+    return None
+
+    # X is [batch, seq] tensor with pad_value where we don't want to attend
+    attn_mask = X != pad_value
+    # attn_mask is [batch, seq] tensor with True where we want to attend
+    # output: [batch, seq, seq] tensor with True where we want to attend
+    # L: query length
+    # S: key length, value length
+    L= S = attn_mask.size(-1)
+    B = attn_mask.size(0)
+    causal_mask_mask = torch.ones((L, S), dtype=torch.bool, device=X.device).triu(diagonal=0)
+    attn_mask = torch.logical_and(attn_mask.view(B, S, 1), causal_mask_mask.view(1, S, L))
+    return attn_mask
+
+
+
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
@@ -233,9 +258,8 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                attn_mask = X != 258
                 #logits, loss = model(X, Y)
-                loss = model(X, targets=Y, attn_mask=attn_mask)
+                logits, loss = model(X, targets=Y, attn_mask=get_causal_mask(X))
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -275,7 +299,6 @@ while True:
         param_group['lr'] = lr
 
     # evaluate the loss on train/val sets and write checkpoints
-    """
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
@@ -300,7 +323,6 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
-    """
     if iter_num == 0 and eval_only:
         break
 
@@ -314,7 +336,8 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss = model(X, targets=Y, attn_mask=get_causal_mask(X))
+            #logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
@@ -351,3 +374,8 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+# %%
+# embedding matrix size = 32000, 4096
+print("number of parameters in original embedding matrix: %.2fM" % (32000*4096/ 1e6,))
+# %%
