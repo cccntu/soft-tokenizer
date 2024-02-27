@@ -8,6 +8,11 @@ model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.2
 device = "cuda" # the device to load the model onto
 model = model.to(device)
 # %%
+model.model.embed_tokens.weight.data
+# %%
+model.lm_head.weight.data
+# they are not shared
+# %%
 orig_embedding_weight = model.model.embed_tokens.weight.data.clone()
 # %%
 new_embedding_weight = torch.load('new_embeddings.pt').to(device).half()

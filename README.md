@@ -22,15 +22,18 @@
 - test the trained embedding
     - `python test_mistral.py`
 
-### V0.1 Result
+### V0
 
 - ~~`The trainging log shows the loss converges to 0 in 0.0000 after 56 iters. Takes a few seconds on a 3090 GPU.~~
     - update: after visual inspection, the model learned to predict the same embedding for all inputs. Changing the hparams and allow it to train longer fixed it.
+#### V0.1
+- Causal mask is disable, and pos emb is added.
 - Training it for 10k iters took ~20mins on a 3090 GPU.
 - Evaluation:
     - Embedding accuracy: I used the trained and original embedding to calculate softmax. The resulting accuracy is 0.9883.
     Meaning the model learned to differentiate between tokens correctly. (see evaluate.py for details)
     - End-to-end test: Replace the token embedding in the main model with the trained embedding. The model can still generate text, but it sometimes generates typo and eventually diverges. (see test_mistral.py for details)
+        - Since lm head is not tied, I think generating typo is the models' attempt to match the imperfect embedding in the prefix.
 
 - TODO:
     - [x] verify the training is working as expected
