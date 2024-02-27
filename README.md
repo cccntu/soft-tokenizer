@@ -17,14 +17,26 @@
     - `python prepare_mistral_data.py`
 - train the model
     - `python train.py`
+- run evaluation
+    - it's done in evaluate.py (%-style notebook)
+- test the trained embedding
+    - `python test_mistral.py`
 
-### V0 Result
+### V0.1 Result
 
-- The trainging log shows the loss converges to 0 in 0.0000 after 56 iters. Takes a few seconds on a 3090 GPU.
+- ~~`The trainging log shows the loss converges to 0 in 0.0000 after 56 iters. Takes a few seconds on a 3090 GPU.~~
+    - update: after visual inspection, the model learned to predict the same embedding for all inputs. Changing the hparams and allow it to train longer fixed it.
+- Training it for 10k iters took ~20mins on a 3090 GPU.
+- Evaluation:
+    - Embedding accuracy: I used the trained and original embedding to calculate softmax. The resulting accuracy is 0.9883.
+    Meaning the model learned to differentiate between tokens correctly. (see evaluate.py for details)
+    - End-to-end test: Replace the token embedding in the main model with the trained embedding. The model can still generate text, but it sometimes generates typo and eventually diverges. (see test_mistral.py for details)
+
 - TODO:
-    - [ ] verify the training is working as expected
-    - [ ] plug this model to mistral and see how it performs
+    - [x] verify the training is working as expected
+    - [x] plug this model to mistral and see how it performs
     - [ ] plug this model to mistral and further train end-to-end
+    - [ ] Try to combine softmax loss (currently only used L1 and MSE loss)
 
 
 ## Future Directions / Discussions / Ideas
