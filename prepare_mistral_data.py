@@ -3,13 +3,15 @@ from collections import Counter
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 model_id = "mistralai/Mistral-7B-Instruct-v0.2"
-model_id = "teknium/OpenHermes-2.5-Mistral-7B"
+#model_id = "teknium/OpenHermes-2.5-Mistral-7B"
 
 tokenizer = tokenizer_mistral = AutoTokenizer.from_pretrained(model_id)
 
 mistral_token_lens = {k: len(k) for k in tokenizer_mistral.vocab.keys()}
 
 {k: v for k, v in mistral_token_lens.items() if v >16}
+# %%
+tokenizer
 # %%
 cnt = Counter(mistral_token_lens.values())
 sorted(list(cnt.items()), key=lambda x: x[0])
@@ -122,6 +124,23 @@ with torch.no_grad():
     out = model.model.embed_tokens(torch.tensor(target_ids))
 output_embeddings = out.numpy().astype(np.float32)
 # %%
+embedding_norm = out.norm(dim=1).numpy()
+
+# %%
+df['embedding_norm'] = embedding_norm
+df.sort_values('embedding_norm', ascending=False)
+# %%
+embedding_max_value = out.max(dim=1).values.numpy()
+embedding_min_value = out.min(dim=1).values.numpy()
+df['embedding_max_value'] = embedding_max_value
+df['embedding_min_value'] = embedding_min_value
+df['embedding_max_abs_value'] = out.abs().max(dim=1).values.numpy()
+df.sort_values('embedding_max_abs_value', ascending=False)
+# %%
+
+# %%
+
+# %%
 #df.to_parquet('mistral_vocab_bytetokens.parquet')
 # export to bin files
 #input_ids.tofile(os.path.join(os.path.dirname(__file__), 'input_ids.bin'))
@@ -129,6 +148,7 @@ output_embeddings = out.numpy().astype(np.float32)
 
 import pickle as pkl
 pkl.dump({
+    'original_token_id': target_ids,
     'input_ids': input_ids,
     'output_embeddings': output_embeddings
 }, open('mistral_vocab_bytetokens.pkl', 'wb'))
@@ -141,8 +161,40 @@ output_embeddings = data['output_embeddings']
 input_ids.shape, output_embeddings.shape, input_ids.dtype, output_embeddings.dtype
 
 # %%
+# save the meta information as well, to help us encode/decode later
+df.to_pickle(os.path.join(os.path.dirname(__file__), 'meta.pkl'))
+# %%
 # there seems to be 2 extra tokens in the embedding
 df
 # %%
 model.model.embed_tokens.weight.shape
+# %%
+df
+# %%
+int_list_to_str(df['bytetokens'][0])
+
+# %%
+ls = [len(tokenizer.tokenize(int_list_to_str([0]+bytetokens))) for bytetokens in df['bytetokens']]
+
+# %%
+import seaborn as sns
+#sns.histplot(ls)
+df['ls'] = ls
+print(df[df['ls']!=3].reset_index()['token'].tolist())
+# %%
+#bytetokens
+for byte in range(256):
+    try:
+        print(byte, int_list_to_str([byte]))
+    except:
+        print(byte, 'error')
+
+# %%
+tokenizer.tokenize(' aaaaaaaaaa')
+
+# %%
+'a' in df['token']
+
+# %%
+'a' in df['token'].tolist()
 # %%
