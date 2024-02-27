@@ -48,7 +48,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, padding_mask=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -57,12 +57,18 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
+        if padding_mask is not None:
+            # add a very negative number to the key at the padding positions
+            padding_mask = padding_mask.view(B, 1, T, 1).broadcast_to(B, self.n_head, T, C // self.n_head)
+            k = k.masked_fill(padding_mask, -1000)
+            #print(f'{k.shape=}, {q.shape=}, {v.shape=}{padding_mask.shape=}, {padding_mask[:, None, None, :].shape=}')
+
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             if attn_mask is not None:
                 attn_mask = attn_mask.view(B, 1, T, T).repeat(1, self.n_head, 1, 1)
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=attn_mask is None)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0, is_causal=False)#attn_mask is None)
         else:
             raise NotImplementedError("the code below is not modified to use attention mask, feel free to do it yourself")
             # manual implementation of attention
@@ -102,8 +108,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, attn_mask=None):
-        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask)
+    def forward(self, x, attn_mask=None, padding_mask=None):
+        x = x + self.attn(self.ln_1(x), attn_mask=attn_mask, padding_mask=padding_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 class FinalProj(nn.Module):
@@ -143,14 +149,15 @@ class GPT(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
-       #     wpe = nn.Embedding(config.block_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         # no lm_head
         #self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.final_proj = FinalProj(config)
+        self.final_proj = nn.Linear(config.n_embd, config.final_dim, bias=config.bias)#FinalProj(config)
+        self.final_proj_multiplier = nn.Parameter(torch.tensor(1/5)) # the embedding l2 norm in mistral is ~0.2 on average
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -187,7 +194,14 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, attn_mask=None):
+    def forward(self, idx,
+                targets=None,
+                attn_mask=None,
+                padding_mask=None,
+                original_embeddings=None, # the original embeddings, for contrastive loss
+                original_embedding_ids=None, # the original embedding ids, for contrastive loss
+                return_details=False
+                ):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -195,23 +209,45 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        #pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb)# + pos_emb)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x, attn_mask=attn_mask)
+            x = block(x, attn_mask=attn_mask, padding_mask=padding_mask)
         x = self.transformer.ln_f(x)
 #        print(f'{x.shape=}')
 
         pooled = x[:, -1, :]
 
-        logits = self.final_proj(pooled)
+        embedding = self.final_proj(pooled) * self.final_proj_multiplier
 
+        # embedding: B, final_dim
+        # targets: B, final_dim
+        # original_embeddings: VOCAB, final_dim
+        # original_embedding_ids: VOCAB
+
+        logs = {}
         if targets is not None:
             # mse loss
-            loss = F.mse_loss(logits, targets)
+            loss = F.mse_loss(embedding, targets) * 100
+            #loss = F.l1_loss(embedding, targets)
+            logs['loss/l1'] = loss
         else:
             loss = None
-        return logits, loss
+
+        if original_embeddings is not None and original_embedding_ids is not None:
+            # contrastive loss
+            logits = torch.matmul(embedding, original_embeddings.T) # B, VOCAB
+            nll = F.cross_entropy(logits, original_embedding_ids)
+            logs['loss/nll'] = nll
+            if loss is not None:
+                loss += nll
+            else:
+                loss = nll
+
+        if return_details:
+            return embedding, loss, logs
+        else:
+            return embedding, loss
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
