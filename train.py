@@ -32,17 +32,18 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
-eval_interval = 30
+out_dir = 'out1'
+eval_interval = 500
 log_interval = 1
-eval_iters = 200
+eval_iters = 20
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'soft-tokenizer'
-wandb_run_name = 'run' + str(time.time())
+import datetime
+wandb_run_name = 'run' + datetime.datetime.now().strftime("_%Y-%m-%d_%H-%M-%S")
 # data
 dataset = 'openwebtext'
 # gradient_accumulation_steps = 15 * 8 # used to simulate larger batch sizes
@@ -52,12 +53,12 @@ block_size = 50 # max token length
 # model
 n_layer = 4 # 12
 n_head = 8 # 12
-n_embd = 512 #768
+n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_epoch = 3 # number of epochs to train for
+max_epoch = 300# number of epochs to train for
 max_iters = 10000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
@@ -65,9 +66,10 @@ beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
+warmup_iters = 20 # how many steps to warm up for
 lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+#min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+min_lr = learning_rate/10 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -129,6 +131,7 @@ print(f"input_ids.shape = {input_ids.shape}, output_embeddings.shape = {output_e
 max_iters = min(len(input_ids) // batch_size * max_epoch, max_iters)
 print(f"max_iters = {max_iters}")
 
+import math
 def get_batch(split):
     data = input_ids #if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -148,6 +151,7 @@ iter_num = 0
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
+"""
 meta_path = os.path.join(data_dir, 'meta.pkl')
 meta_vocab_size = None
 if os.path.exists(meta_path):
@@ -155,6 +159,7 @@ if os.path.exists(meta_path):
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+"""
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -228,6 +233,12 @@ if compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
+
+def get_padding_mask(X, pad_value=258):
+    # the result from quick testing shows no difference whether we use this or not
+    # so I disabled it for now, to keep it simple.
+    return None
+    return X == pad_value
 def get_causal_mask(X, pad_value=258):
     # for some reason, this causes the model to get nan loss
     # so I disabled it, the model falls back to using the default causal mask,
@@ -259,7 +270,7 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 #logits, loss = model(X, Y)
-                logits, loss = model(X, targets=Y, attn_mask=get_causal_mask(X))
+                logits, loss = model(X, targets=Y, padding_mask=get_padding_mask(X))
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -336,7 +347,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, targets=Y, attn_mask=get_causal_mask(X))
+            logits, loss = model(X, targets=Y, padding_mask=get_padding_mask(X))
             #logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
